@@ -1,0 +1,19 @@
+[project]
+name = "min-lejepa"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "einops>=0.8.2",
+    "flax>=0.12.6",
+    "jax>=0.9.2",
+    "mnist1d>=0.0.2.post1",
+    "numpy>=2.4.4",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.8",
+]
