@@ -64,7 +64,6 @@ def lejepa_loss_fn(encoder, reg_projector, views, n_slices, lamb, rngs):
 grad_fn = nnx.value_and_grad(lejepa_loss_fn, argnums=(0, 1), has_aux=True)
 
 
-# TODO see if we can just use mnist1d's built-in augmentations.
 def gen_views(x, n_views, rngs):
     """
     Mirrors mnist1d's generative transforms: shift, scale (amplitude),
@@ -74,40 +73,42 @@ def gen_views(x, n_views, rngs):
     bs, l = x.shape
 
     def one_view(key):
-        k_shift, k_scale, k_corr, k_iid, k_mask_pos, k_mask_len, k_flip = (
+        k_shift, k_scale, k_corr, k_iid, k_mask_pos, k_mask_len, k_shear = (
             jax.random.split(key, 7)
         )
 
-        # 1. Shift (mnist1d default max_translation is ~8 on length 40)
-        shifts = jax.random.randint(k_shift, (bs,), -8, 9)
+        # shift
+        shifts = jax.random.randint(k_shift, (bs,), 0, l)
         v = jax.vmap(lambda xi, s: jnp.roll(xi, s))(x, shifts)
 
-        # 2. Amplitude scale (per-example)
+        # amplitude scale (per-example)
         scale = 1.0 + 0.3 * jax.random.normal(k_scale, (bs, 1))
         v = v * scale
 
-        # 3. Correlated (low-frequency) noise: gaussian-smoothed noise
-        #    approximates mnist1d's corr_noise by blurring white noise
+        # correlated (low-frequency) gaussian-smoothed noise
         raw = jax.random.normal(k_corr, (bs, l))
-        # simple box-blur via convolution (kernel size 7)
         kernel = jnp.ones((7,)) / 7
         corr = jax.vmap(lambda r: jnp.convolve(r, kernel, mode="same"))(raw)
         v = v + 0.25 * corr
 
-        # 4. iid noise
+        # iid noise
         v = v + 0.05 * jax.random.normal(k_iid, (bs, l))
 
-        # 5. Random masking: zero out a contiguous chunk (length-invariance)
+        # masking: zero out a contiguous chunk (length-invariance)
         mask_len = jax.random.randint(k_mask_len, (bs,), 0, 8)  # 0-7 zeros
         mask_pos = jax.random.randint(k_mask_pos, (bs,), 0, l)
         idx = jnp.arange(l)[None, :]  # (1, l)
         mask = (idx >= mask_pos[:, None]) & (idx < (mask_pos + mask_len)[:, None])
         v = jnp.where(mask, 0.0, v)
 
+        # shear: subtract random linear ramp (mnist1d uses scale=0.75)
+        coeff = 0.75 * (jax.random.uniform(k_shear, (bs, 1)) - 0.5)
+        v = v - coeff * jnp.linspace(-0.5, 0.5, l)
+
         return v
 
     keys = jax.random.split(rngs.next(), n_views)
-    views = jnp.stack([one_view(k) for k in keys], axis=1)  # (bs, V, l)
+    views = jnp.stack([one_view(k) for k in keys], axis=1)
     return views
 
 
