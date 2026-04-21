@@ -64,6 +64,7 @@ def lejepa_loss_fn(encoder, reg_projector, views, n_slices, lamb, rngs):
 grad_fn = nnx.value_and_grad(lejepa_loss_fn, argnums=(0, 1), has_aux=True)
 
 
+# TODO see if we can just use mnist1d's built-in augmentations.
 def gen_views(x, n_views, rngs):
     """
     Mirrors mnist1d's generative transforms: shift, scale (amplitude),
@@ -119,23 +120,16 @@ def test_acc(model, loader):
     return correct / total
 
 
-class Model(nnx.Module):
-    def __init__(self, cfg):
-        self.enc = enc
-        self.projector = projector
-        self.probe = probe
-
-
 @dataclass
 class Config:
     n_slices: int = 128
-    n_views: int = 8
+    n_views: int = 4
     lamb: float = 0.05
     reg_projector: bool = True
 
-    h_dim: int = 128
-    emb_dim: int = 64
+    emb_dim: int = 128
     proj_dim: int = 16
+    h_dim: int = 64
 
     bs: int = 32
     lr: float = 3e-4
