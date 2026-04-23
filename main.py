@@ -37,7 +37,7 @@ def sigreg_loss(embs, n_slices, rngs):
 
     projs = embs @ A
 
-    # Using exp(ix) = cos(x) + i sin(x) and
+    # Using exp(ix) = cos(x) + i sin(x) and sep error terms to avoid complex numbers
     x_t = rearrange(projs, "b v m -> b v m 1") * t
 
     # average over batch (MC estimate), keep views
@@ -52,7 +52,6 @@ def sigreg_loss(embs, n_slices, rngs):
 
 def lejepa_loss(encoder, views, n_slices, lamb, rngs):
 
-    encoder.train()
     embs, loss_embs = encoder(views)
 
     centers = reduce(loss_embs, "b v d -> b 1 d", "mean")
@@ -67,7 +66,7 @@ lejepa_grad = nnx.value_and_grad(lejepa_loss, has_aux=True)
 
 
 def gen_views(x, n_views, rngs):
-    bs, l = x.shape
+    bs, seq_len = x.shape
 
     # Mirrors mnist1d's generative transforms
     def one_view(key):
@@ -76,7 +75,7 @@ def gen_views(x, n_views, rngs):
         )
 
         # shift
-        shifts = jax.random.randint(k_shift, (bs,), 0, l)
+        shifts = jax.random.randint(k_shift, (bs,), 0, seq_len)
         v = jax.vmap(lambda xi, s: jnp.roll(xi, s))(x, shifts)
 
         # amplitude scale (per-example)
@@ -84,24 +83,24 @@ def gen_views(x, n_views, rngs):
         v = v * scale
 
         # correlated (low-frequency) gaussian-smoothed noise
-        raw = jax.random.normal(k_corr, (bs, l))
+        raw = jax.random.normal(k_corr, (bs, seq_len))
         kernel = jnp.ones((7,)) / 7
         corr = jax.vmap(lambda r: jnp.convolve(r, kernel, mode="same"))(raw)
         v = v + 0.25 * corr
 
         # iid noise
-        v = v + 0.05 * jax.random.normal(k_iid, (bs, l))
+        v = v + 0.05 * jax.random.normal(k_iid, (bs, seq_len))
 
         # masking: zero out a contiguous chunk (length-invariance)
         mask_len = jax.random.randint(k_mask_len, (bs,), 0, 8)  # 0-7 zeros
-        mask_pos = jax.random.randint(k_mask_pos, (bs,), 0, l)
-        idx = jnp.arange(l)[None, :]  # (1, l)
+        mask_pos = jax.random.randint(k_mask_pos, (bs,), 0, seq_len)
+        idx = jnp.arange(seq_len)[None, :]  # (1, seq_len)
         mask = (idx >= mask_pos[:, None]) & (idx < (mask_pos + mask_len)[:, None])
         v = jnp.where(mask, 0.0, v)
 
         # shear: subtract random linear ramp (mnist1d uses scale=0.75)
         coeff = 0.75 * (jax.random.uniform(k_shear, (bs, 1)) - 0.5)
-        v = v - coeff * jnp.linspace(-0.5, 0.5, l)
+        v = v - coeff * jnp.linspace(-0.5, 0.5, seq_len)
 
         return v
 
@@ -111,7 +110,6 @@ def gen_views(x, n_views, rngs):
 
 
 def test_acc(model, loader):
-    model.eval()
     correct, total = 0, 0
     for x, y in loader:
         correct += (jnp.argmax(model(x), axis=-1) == y).sum()
@@ -131,7 +129,7 @@ class Config:
     h_dim: int = 64
 
     bs: int = 32
-    lr: float = 3e-4
+    lr: float = 1e-3
     steps: int = 10_000
     seed: int = 0
 
@@ -139,9 +137,7 @@ class Config:
 if __name__ == "__main__":
     cfg = simple_parsing.parse(Config)
     rngs = nnx.Rngs(cfg.seed)
-
     ds = mnist1d.data.make_dataset()
-    seq_len = ds["t"].size  # 1d feature size
 
     def train_loader():
         while True:
@@ -162,8 +158,6 @@ if __name__ == "__main__":
         def __init__(self, cfg, rngs):
 
             conv = partial(nnx.Conv, kernel_size=(5,), padding="SAME", rngs=rngs)
-            bn = partial(nnx.BatchNorm, rngs=rngs, use_bias=False, use_scale=False)
-
             self.backbone = nnx.Sequential(
                 partial(rearrange, pattern="b ... l -> b ... l 1"),
                 conv(1, cfg.h_dim),
@@ -172,16 +166,9 @@ if __name__ == "__main__":
                 nnx.relu,
                 conv(cfg.h_dim, cfg.emb_dim, strides=(2,)),
                 partial(reduce, pattern="b ... l d -> b ... d", reduction="mean"),
-                bn(cfg.emb_dim),
             )
             self.projector = (
-                nnx.Sequential(
-                    # nnx.Linear(cfg.emb_dim, cfg.proj_dim, rngs=rngs),
-                    nnx.Linear(cfg.emb_dim, cfg.h_dim, rngs=rngs),
-                    nnx.relu,
-                    nnx.Linear(cfg.h_dim, cfg.proj_dim, rngs=rngs),
-                    bn(cfg.proj_dim),
-                )
+                nnx.Linear(cfg.emb_dim, cfg.proj_dim, rngs=rngs)
                 if cfg.projector
                 else None
             )
@@ -192,7 +179,7 @@ if __name__ == "__main__":
             return embs, loss_embs
 
     enc = Encoder(cfg, rngs)
-    enc_opt = nnx.Optimizer(enc, optax.adam(cfg.lr), wrt=nnx.Param)
+    enc_opt = nnx.Optimizer(enc, optax.adamw(cfg.lr), wrt=nnx.Param)
 
     probe = nnx.Linear(cfg.emb_dim, 10, rngs=rngs)
     probe_grad_fn = nnx.value_and_grad(
@@ -201,47 +188,47 @@ if __name__ == "__main__":
             labels=repeat(y, "b -> (b v)", v=cfg.n_views),
         ).mean()
     )
-    probe_opt = nnx.Optimizer(probe, optax.adam(cfg.lr), wrt=nnx.Param)
+    probe_opt = nnx.Optimizer(probe, optax.adamw(cfg.lr), wrt=nnx.Param)
 
-    # baseline: cross-entropy classifier without stop gradient
+    # supervised baseline: cross-entropy classifier without stop gradient
     clf = nnx.Sequential(nnx.clone(enc.backbone), nnx.clone(probe))
     clf_grad_fn = nnx.value_and_grad(lambda clf, x, y: softmax_ce(clf(x), y).mean())
-    clf_opt = nnx.Optimizer(clf, optax.adam(cfg.lr), wrt=nnx.Param)
+    clf_opt = nnx.Optimizer(clf, optax.adamw(cfg.lr), wrt=nnx.Param)
 
     @nnx.jit
     def train_step(enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs):
 
-        vs = gen_views(x, n_views=cfg.n_views, rngs=rngs)
+        views = gen_views(x, n_views=cfg.n_views, rngs=rngs)
         ((loss, (embs, _, pred_loss, reg_loss)), enc_grads) = lejepa_grad(
-            enc, views=vs, n_slices=cfg.n_slices, lamb=cfg.lamb, rngs=rngs
+            enc, views=views, n_slices=cfg.n_slices, lamb=cfg.lamb, rngs=rngs
         )
         enc_opt.update(enc, enc_grads)
 
         # probe is just a diagnostic, so we don't backprop through the encoder
         embs = jax.lax.stop_gradient(embs)
-        probe_loss_val, probe_grads = probe_grad_fn(probe, embs, y)
+        probe_loss, probe_grads = probe_grad_fn(probe, embs, y)
         probe_opt.update(probe, probe_grads)
 
         # classifier baseline
-        clf_loss_val, clf_grads = clf_grad_fn(clf, x, y)
+        clf_loss, clf_grads = clf_grad_fn(clf, x, y)
         clf_opt.update(clf, clf_grads)
 
         # monitor for collapse
         per_dim_std = jnp.std(rearrange(embs, "b v d -> (b v) d"), axis=0)
 
-        return loss, pred_loss, reg_loss, probe_loss_val, clf_loss_val, per_dim_std
+        return loss, pred_loss, reg_loss, probe_loss, clf_loss, per_dim_std
 
     for step, (x, y) in enumerate(train_loader()):
-        loss, pred_loss, reg_loss, probe_loss_val, clf_loss_val, per_dim_std = (
-            train_step(enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs)
+        loss, pred_loss, reg_loss, probe_loss, clf_loss, per_dim_std = train_step(
+            enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs
         )
 
         if step % 100 == 0:
             print(
                 f"step={step} pred={pred_loss:.4f} reg={reg_loss:.4f} "
-                f"probe={probe_loss_val:.4f} probe_test_acc={test_acc(nnx.Sequential(enc.backbone, probe), test_loader()):.4f} "
-                f"std_min={per_dim_std.min():.3f} std_mean={per_dim_std.mean():.3f} "
-                f"clf={clf_loss_val:.4f} clf_test_acc={test_acc(clf, test_loader()):.4f}"
+                f"probe={probe_loss:.4f} probe_acc={test_acc(nnx.Sequential(enc.backbone, probe), test_loader()):.4f} "
+                f"clf={clf_loss:.4f} clf_acc={test_acc(clf, test_loader()):.4f} "
+                f"std_min={per_dim_std.min():.3f} std_mean={per_dim_std.mean():.3f}"
             )
 
         if step >= cfg.steps:
