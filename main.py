@@ -9,6 +9,9 @@
 #     "simple-parsing>=0.1.8",
 # ]
 # ///
+
+# A minimal toy implementation of LeJEPA on the mnist1d dataset.
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -46,32 +49,26 @@ def sigreg_loss(embs, n_slices, rngs):
     return reduce(EP, "b m -> ", "mean")
 
 
-def lejepa_loss_fn(encoder, reg_projector, views, n_slices, lamb, rngs):
+def lejepa_loss(encoder, views, n_slices, lamb, rngs):
 
     encoder.train()
-    reg_projector.train()
-    embs = encoder(views)
-    reg_embs = reg_projector(embs)
+    embs, loss_embs = encoder(views)
 
-    centers = reduce(embs, "b v d -> b 1 d", "mean")
-    pred_loss = jnp.square(embs - centers).mean()
-    reg_loss = sigreg_loss(reg_embs, n_slices=n_slices, rngs=rngs)
+    centers = reduce(loss_embs, "b v d -> b 1 d", "mean")
+    pred_loss = jnp.square(loss_embs - centers).mean()
+    reg_loss = sigreg_loss(loss_embs, n_slices=n_slices, rngs=rngs)
 
     loss = lamb * reg_loss + (1 - lamb) * pred_loss
-    return loss, (embs, reg_embs, pred_loss, reg_loss)
+    return loss, (embs, loss_embs, pred_loss, reg_loss)
 
 
-grad_fn = nnx.value_and_grad(lejepa_loss_fn, argnums=(0, 1), has_aux=True)
+lejepa_grad = nnx.value_and_grad(lejepa_loss, has_aux=True)
 
 
 def gen_views(x, n_views, rngs):
-    """
-    Mirrors mnist1d's generative transforms: shift, scale (amplitude),
-    correlated (low-freq) noise, iid noise, and random masking.
-    x: (bs, l) -> (bs, V, l)
-    """
     bs, l = x.shape
 
+    # Mirrors mnist1d's generative transforms
     def one_view(key):
         k_shift, k_scale, k_corr, k_iid, k_mask_pos, k_mask_len, k_shear = (
             jax.random.split(key, 7)
@@ -108,8 +105,8 @@ def gen_views(x, n_views, rngs):
         return v
 
     keys = jax.random.split(rngs.next(), n_views)
-    views = jnp.stack([one_view(k) for k in keys], axis=1)
-    return views
+    views = jax.vmap(one_view)(keys)
+    return rearrange(views, "v b l -> b v l")
 
 
 def test_acc(model, loader):
@@ -126,7 +123,7 @@ class Config:
     n_slices: int = 128
     n_views: int = 4
     lamb: float = 0.05
-    reg_projector: bool = True
+    projector: bool = True
 
     emb_dim: int = 128
     proj_dim: int = 16
@@ -161,34 +158,55 @@ if __name__ == "__main__":
             )
 
     # TODO make this less hard-coded
-    enc = nnx.Sequential(
-        partial(rearrange, pattern="b ... l -> b ... l 1"),
-        nnx.Conv(1, 64, kernel_size=(5,), padding="SAME", rngs=rngs),
-        nnx.relu,
-        nnx.Conv(64, 64, kernel_size=(5,), strides=(2,), padding="SAME", rngs=rngs),
-        nnx.relu,
-        nnx.Conv(
-            64, cfg.emb_dim, kernel_size=(5,), strides=(2,), padding="SAME", rngs=rngs
-        ),
-        nnx.relu,
-        nnx.Conv(cfg.emb_dim, cfg.emb_dim, kernel_size=(5,), padding="SAME", rngs=rngs),
-        partial(reduce, pattern="b ... l d -> b ... d", reduction="mean"),
-        # makes it easier for SIGReg
-        nnx.BatchNorm(cfg.emb_dim, rngs=rngs, use_bias=False, use_scale=False),
-    )
-    projector = (
-        nnx.Sequential(
-            nnx.Linear(cfg.emb_dim, cfg.h_dim, rngs=rngs),
-            nnx.relu,
-            nnx.Linear(cfg.h_dim, cfg.proj_dim, rngs=rngs),
-            nnx.BatchNorm(cfg.proj_dim, rngs=rngs, use_bias=False, use_scale=False),
-        )
-        if cfg.reg_projector
-        else nnx.Sequential()
-    )
+    class Encoder(nnx.Module):
+        def __init__(self, cfg, rngs):
 
+            self.backbone = nnx.Sequential(
+                partial(rearrange, pattern="b ... l -> b ... l 1"),
+                nnx.Conv(1, 64, kernel_size=(5,), padding="SAME", rngs=rngs),
+                nnx.relu,
+                nnx.Conv(
+                    64, 64, kernel_size=(5,), strides=(2,), padding="SAME", rngs=rngs
+                ),
+                nnx.relu,
+                nnx.Conv(
+                    64,
+                    cfg.emb_dim,
+                    kernel_size=(5,),
+                    strides=(2,),
+                    padding="SAME",
+                    rngs=rngs,
+                ),
+                nnx.relu,
+                nnx.Conv(
+                    cfg.emb_dim,
+                    cfg.emb_dim,
+                    kernel_size=(5,),
+                    padding="SAME",
+                    rngs=rngs,
+                ),
+                partial(reduce, pattern="b ... l d -> b ... d", reduction="mean"),
+                # makes it easier for SIGReg
+                nnx.BatchNorm(cfg.emb_dim, rngs=rngs, use_bias=False, use_scale=False),
+            )
+            self.projector = (
+                nnx.Sequential(
+                    nnx.Linear(cfg.emb_dim, cfg.proj_dim, rngs=rngs),
+                    nnx.BatchNorm(
+                        cfg.proj_dim, rngs=rngs, use_bias=False, use_scale=False
+                    ),
+                )
+                if cfg.projector
+                else None
+            )
+
+        def __call__(self, views):
+            embs = self.backbone(views)
+            proj_embs = self.projector(embs) if self.projector else embs
+            return embs, proj_embs
+
+    enc = Encoder(cfg, rngs)
     enc_opt = nnx.Optimizer(enc, optax.adam(cfg.lr), wrt=nnx.Param)
-    proj_opt = nnx.Optimizer(projector, optax.adam(cfg.lr), wrt=nnx.Param)
 
     probe = nnx.Linear(cfg.emb_dim, 10, rngs=rngs)
     probe_grad_fn = nnx.value_and_grad(
@@ -200,27 +218,25 @@ if __name__ == "__main__":
     probe_opt = nnx.Optimizer(probe, optax.adam(cfg.lr), wrt=nnx.Param)
 
     # baseline: cross-entropy classifier without stop gradient
-    clf_enc, clf_probe = nnx.clone(enc), nnx.clone(probe)
-    clf = nnx.Sequential(clf_enc, clf_probe)
+    clf = nnx.Sequential(nnx.clone(enc.backbone), nnx.clone(probe))
     clf_grad_fn = nnx.value_and_grad(lambda clf, x, y: softmax_ce(clf(x), y).mean())
     clf_opt = nnx.Optimizer(clf, optax.adam(cfg.lr), wrt=nnx.Param)
 
-    for step, (x, y) in enumerate(train_loader()):
+    @nnx.jit
+    def train_step(enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs):
         vs = gen_views(x, n_views=cfg.n_views, rngs=rngs)
 
         (
-            (lejepa_loss, (embs, reg_embs, pred_loss, reg_loss)),
-            (enc_grads, proj_grads),
-        ) = grad_fn(
+            (loss, (embs, _, pred_loss, reg_loss)),
+            enc_grads,
+        ) = lejepa_grad(
             enc,
-            projector,
             views=vs,
             n_slices=cfg.n_slices,
             lamb=cfg.lamb,
             rngs=rngs,
         )
         enc_opt.update(enc, enc_grads)
-        proj_opt.update(projector, proj_grads)
 
         # probe is just a diagnostic, so we don't backprop through the encoder
         embs = jax.lax.stop_gradient(embs)
@@ -231,12 +247,20 @@ if __name__ == "__main__":
         clf_loss_val, clf_grads = clf_grad_fn(clf, x, y)
         clf_opt.update(clf, clf_grads)
 
+        # monitor for collapse
+        per_dim_std = jnp.std(rearrange(embs, "b v d -> (b v) d"), axis=0)
+
+        return loss, pred_loss, reg_loss, probe_loss_val, clf_loss_val, per_dim_std
+
+    for step, (x, y) in enumerate(train_loader()):
+        loss, pred_loss, reg_loss, probe_loss_val, clf_loss_val, per_dim_std = (
+            train_step(enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs)
+        )
+
         if step % 100 == 0:
-            flat = rearrange(embs, "b v d -> (b v) d")
-            per_dim_std = jnp.std(flat, axis=0)
             print(
                 f"step={step} pred={pred_loss:.4f} reg={reg_loss:.4f} "
-                f"probe={probe_loss_val:.4f} probe_test_acc={test_acc(nnx.Sequential(enc, probe), test_loader()):.4f} "
+                f"probe={probe_loss_val:.4f} probe_test_acc={test_acc(nnx.Sequential(enc.backbone, probe), test_loader()):.4f} "
                 f"std_min={per_dim_std.min():.3f} std_mean={per_dim_std.mean():.3f} "
                 f"clf={clf_loss_val:.4f} clf_test_acc={test_acc(clf, test_loader()):.4f}"
             )
