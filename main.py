@@ -39,14 +39,15 @@ def sigreg_loss(embs, n_slices, rngs):
 
     # Using exp(ix) = cos(x) + i sin(x) and
     x_t = rearrange(projs, "b v m -> b v m 1") * t
-    # important: mean over views
-    x_t_cos = reduce(jnp.cos(x_t), "b v m t -> b m t", "mean")
-    x_t_sin = reduce(jnp.sin(x_t), "b v m t -> b m t", "mean")
+
+    # average over batch (MC estimate), keep views
+    x_t_cos = reduce(jnp.cos(x_t), "b v m t -> v m t", "mean")
+    x_t_sin = reduce(jnp.sin(x_t), "b v m t -> v m t", "mean")
 
     err = jnp.square(x_t_cos - exp_f) + jnp.square(x_t_sin - 0)
 
     EP = v * jnp.trapezoid(err * exp_f, t, axis=-1)
-    return reduce(EP, "b m -> ", "mean")
+    return reduce(EP, "v m -> ", "mean")
 
 
 def lejepa_loss(encoder, views, n_slices, lamb, rngs):
@@ -157,44 +158,29 @@ if __name__ == "__main__":
                 ds["y_test"][i * cfg.bs : (i + 1) * cfg.bs],
             )
 
-    # TODO make this less hard-coded
     class Encoder(nnx.Module):
         def __init__(self, cfg, rngs):
 
+            conv = partial(nnx.Conv, kernel_size=(5,), padding="SAME", rngs=rngs)
+            bn = partial(nnx.BatchNorm, rngs=rngs, use_bias=False, use_scale=False)
+
             self.backbone = nnx.Sequential(
                 partial(rearrange, pattern="b ... l -> b ... l 1"),
-                nnx.Conv(1, 64, kernel_size=(5,), padding="SAME", rngs=rngs),
+                conv(1, cfg.h_dim),
                 nnx.relu,
-                nnx.Conv(
-                    64, 64, kernel_size=(5,), strides=(2,), padding="SAME", rngs=rngs
-                ),
+                conv(cfg.h_dim, cfg.h_dim, strides=(2,)),
                 nnx.relu,
-                nnx.Conv(
-                    64,
-                    cfg.emb_dim,
-                    kernel_size=(5,),
-                    strides=(2,),
-                    padding="SAME",
-                    rngs=rngs,
-                ),
-                nnx.relu,
-                nnx.Conv(
-                    cfg.emb_dim,
-                    cfg.emb_dim,
-                    kernel_size=(5,),
-                    padding="SAME",
-                    rngs=rngs,
-                ),
+                conv(cfg.h_dim, cfg.emb_dim, strides=(2,)),
                 partial(reduce, pattern="b ... l d -> b ... d", reduction="mean"),
-                # makes it easier for SIGReg
-                nnx.BatchNorm(cfg.emb_dim, rngs=rngs, use_bias=False, use_scale=False),
+                bn(cfg.emb_dim),
             )
             self.projector = (
                 nnx.Sequential(
-                    nnx.Linear(cfg.emb_dim, cfg.proj_dim, rngs=rngs),
-                    nnx.BatchNorm(
-                        cfg.proj_dim, rngs=rngs, use_bias=False, use_scale=False
-                    ),
+                    # nnx.Linear(cfg.emb_dim, cfg.proj_dim, rngs=rngs),
+                    nnx.Linear(cfg.emb_dim, cfg.h_dim, rngs=rngs),
+                    nnx.relu,
+                    nnx.Linear(cfg.h_dim, cfg.proj_dim, rngs=rngs),
+                    bn(cfg.proj_dim),
                 )
                 if cfg.projector
                 else None
@@ -202,8 +188,8 @@ if __name__ == "__main__":
 
         def __call__(self, views):
             embs = self.backbone(views)
-            proj_embs = self.projector(embs) if self.projector else embs
-            return embs, proj_embs
+            loss_embs = self.projector(embs) if self.projector else embs
+            return embs, loss_embs
 
     enc = Encoder(cfg, rngs)
     enc_opt = nnx.Optimizer(enc, optax.adam(cfg.lr), wrt=nnx.Param)
@@ -224,17 +210,10 @@ if __name__ == "__main__":
 
     @nnx.jit
     def train_step(enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs):
-        vs = gen_views(x, n_views=cfg.n_views, rngs=rngs)
 
-        (
-            (loss, (embs, _, pred_loss, reg_loss)),
-            enc_grads,
-        ) = lejepa_grad(
-            enc,
-            views=vs,
-            n_slices=cfg.n_slices,
-            lamb=cfg.lamb,
-            rngs=rngs,
+        vs = gen_views(x, n_views=cfg.n_views, rngs=rngs)
+        ((loss, (embs, _, pred_loss, reg_loss)), enc_grads) = lejepa_grad(
+            enc, views=vs, n_slices=cfg.n_slices, lamb=cfg.lamb, rngs=rngs
         )
         enc_opt.update(enc, enc_grads)
 
