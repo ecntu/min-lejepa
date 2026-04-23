@@ -29,7 +29,7 @@ for lr in 1e-4 3e-4 1e-3; do
               args+=(--proj_dim "$proj_dim")
             fi
 
-            uv run main.py "${args[@]}" 2>&1 | tee "${logfile}.log"
+            uv run --with jax[tpu] main.py "${args[@]}" 2>&1 | tee "${logfile}.log"
           done
         done
       done
