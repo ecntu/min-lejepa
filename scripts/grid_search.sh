@@ -29,6 +29,11 @@ for lr in 1e-4 3e-4 1e-3; do
               args+=(--proj_dim "$proj_dim")
             fi
 
+            if [[ -s "${logfile}.log" ]]; then
+              echo "skipping ${logfile}.log (already exists)"
+              continue
+            fi
+
             uv run --with jax[tpu] main.py "${args[@]}" 2>&1 | tee "${logfile}.log"
           done
         done
