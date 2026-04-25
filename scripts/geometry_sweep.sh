@@ -8,13 +8,13 @@ lamb=0.1
 n_views=8
 steps=50_000
 
-# 138 runs total
+# 117 runs total
 for seed in 0 1 2; do
   for emb_dim in 4 8 16 32 64 128 256; do
     for projector in false true; do
       pd_list=("none")
       if [[ "$projector" == "true" ]]; then
-        pd_list=(1 2 4 8 16 32 64)
+        pd_list=(2 4 8 16 32 64)
       fi
 
       for proj_dim in "${pd_list[@]}"; do
