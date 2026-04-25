@@ -121,7 +121,7 @@ def test_acc(model, loader):
 class Config:
     n_slices: int = 128
     n_views: int = 4
-    lamb: float = 0.05
+    lamb: float = 0.1
     projector: bool = True
 
     emb_dim: int = 128
@@ -130,7 +130,7 @@ class Config:
 
     bs: int = 32
     lr: float = 1e-3
-    steps: int = 10_000
+    steps: int = 50_000
     seed: int = 0
 
 
