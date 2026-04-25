@@ -29,13 +29,11 @@ def sigreg_loss(embs, n_slices, rngs):
 
     A = jax.random.normal(rngs.next(), (d, n_slices))
     A = A / jnp.linalg.norm(A, axis=0, keepdims=True)
-
-    t = jnp.linspace(-3, 3, 17)
+    projs = embs @ A
 
     # theoretical gaussian CF and w(t) weighting
+    t = jnp.linspace(-3, 3, 17)
     exp_f = jnp.exp(-0.5 * t**2)
-
-    projs = embs @ A
 
     # Using exp(ix) = cos(x) + i sin(x) and sep error terms to avoid complex numbers
     x_t = rearrange(projs, "b v m -> b v m 1") * t
