@@ -233,3 +233,5 @@ if __name__ == "__main__":
 
         if step >= cfg.steps:
             break
+
+    print("done")

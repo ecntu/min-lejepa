@@ -29,8 +29,8 @@ for lr in 1e-4 3e-4 1e-3; do
               args+=(--proj_dim "$proj_dim")
             fi
 
-            if [[ -s "${logfile}.log" ]]; then
-              echo "skipping ${logfile}.log (already exists)"
+            if grep -q "^done$" "${logfile}.log" 2>/dev/null; then
+              echo "skipping ${logfile}.log (already complete)"
               continue
             fi
 
