@@ -133,7 +133,7 @@ def geom(embs):
 class Config:
     n_slices: int = 128
     n_views: int = 4
-    lamb: float = 0.1
+    lamb: float = 0.01
     projector: bool = True
 
     emb_dim: int = 128
