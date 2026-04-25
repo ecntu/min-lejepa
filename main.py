@@ -117,6 +117,16 @@ def test_acc(model, loader):
     return correct / total
 
 
+@jax.jit
+def geom(embs):
+    d = embs.shape[-1]
+    flat = rearrange(embs, "b v d -> (b v) d")
+    per_dim_std = jnp.std(flat, axis=0)
+    eigs = jnp.maximum(jnp.linalg.eigvalsh(jnp.cov(flat, rowvar=False)), 0.0)
+    eff_rank = eigs.sum() ** 2 / (jnp.square(eigs).sum() + 1e-12)
+    return per_dim_std.min(), per_dim_std.mean(), eff_rank / d
+
+
 @dataclass
 class Config:
     n_slices: int = 128
@@ -199,7 +209,7 @@ if __name__ == "__main__":
     def train_step(enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs):
 
         views = gen_views(x, n_views=cfg.n_views, rngs=rngs)
-        ((loss, (embs, _, pred_loss, reg_loss)), enc_grads) = lejepa_grad(
+        ((_, (embs, loss_embs, pred_loss, reg_loss)), enc_grads) = lejepa_grad(
             enc, views=views, n_slices=cfg.n_slices, lamb=cfg.lamb, rngs=rngs
         )
         enc_opt.update(enc, enc_grads)
@@ -213,22 +223,21 @@ if __name__ == "__main__":
         clf_loss, clf_grads = clf_grad_fn(clf, x, y)
         clf_opt.update(clf, clf_grads)
 
-        # monitor for collapse
-        per_dim_std = jnp.std(rearrange(embs, "b v d -> (b v) d"), axis=0)
-
-        return loss, pred_loss, reg_loss, probe_loss, clf_loss, per_dim_std
+        return pred_loss, reg_loss, probe_loss, clf_loss, embs, loss_embs
 
     for step, (x, y) in enumerate(train_loader()):
-        loss, pred_loss, reg_loss, probe_loss, clf_loss, per_dim_std = train_step(
+        pred_loss, reg_loss, probe_loss, clf_loss, embs, loss_embs = train_step(
             enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs
         )
 
         if step % 100 == 0:
+            std_min, std_mean, iso = geom(embs)
+            _, _, pj_iso = geom(loss_embs)
             print(
                 f"step={step} pred={pred_loss:.4f} reg={reg_loss:.4f} "
                 f"probe={probe_loss:.4f} probe_acc={test_acc(nnx.Sequential(enc.backbone, probe), test_loader()):.4f} "
                 f"clf={clf_loss:.4f} clf_acc={test_acc(clf, test_loader()):.4f} "
-                f"std_min={per_dim_std.min():.3f} std_mean={per_dim_std.mean():.3f}"
+                f"std_min={std_min:.3f} std_mean={std_mean:.3f} iso={iso:.3f} pj_iso={pj_iso:.3f}"
             )
 
         if step >= cfg.steps:
