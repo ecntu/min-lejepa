@@ -25,7 +25,8 @@ import simple_parsing
 
 
 def sigreg_loss(embs, n_slices, rngs):
-    v, d = embs.shape[-2:]  # last two dims must be views, embedding dim
+
+    n, d = embs.shape
 
     # project onto random dirs sampled from hypersphere
     A = jax.random.normal(rngs.next(), (d, n_slices))
@@ -37,16 +38,16 @@ def sigreg_loss(embs, n_slices, rngs):
     exp_f = jnp.exp(-0.5 * t**2)
 
     # Using exp(ix) = cos(x) + i sin(x) and sep error terms to avoid complex numbers
-    x_t = rearrange(projs, "b v m -> b v m 1") * t
+    x_t = rearrange(projs, "n s -> n s 1") * t
 
-    # average over batch (MC estimate), keep views
-    x_t_cos = reduce(jnp.cos(x_t), "b v m t -> v m t", "mean")
-    x_t_sin = reduce(jnp.sin(x_t), "b v m t -> v m t", "mean")
+    # average over samples
+    x_t_cos = reduce(jnp.cos(x_t), "n s t -> s t", "mean")
+    x_t_sin = reduce(jnp.sin(x_t), "n s t -> s t", "mean")
 
     err = jnp.square(x_t_cos - exp_f) + jnp.square(x_t_sin - 0)
 
-    EP = v * jnp.trapezoid(err * exp_f, t, axis=-1)
-    return reduce(EP, "v m -> ", "mean")
+    EP = n * jnp.trapezoid(err * exp_f, t, axis=-1)
+    return reduce(EP, "s -> ", "mean")
 
 
 def lejepa_loss(encoder, views, n_slices, lamb, rngs):
@@ -55,7 +56,9 @@ def lejepa_loss(encoder, views, n_slices, lamb, rngs):
 
     centers = reduce(loss_embs, "b v d -> b 1 d", "mean")
     pred_loss = jnp.square(loss_embs - centers).mean()
-    reg_loss = sigreg_loss(loss_embs, n_slices=n_slices, rngs=rngs)
+
+    flat_embs = rearrange(loss_embs, "b v d -> (b v) d")
+    reg_loss = sigreg_loss(flat_embs, n_slices=n_slices, rngs=rngs)
 
     loss = lamb * reg_loss + (1 - lamb) * pred_loss
     return loss, (embs, loss_embs, pred_loss, reg_loss)
