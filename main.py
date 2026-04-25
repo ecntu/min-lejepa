@@ -27,6 +27,7 @@ import simple_parsing
 def sigreg_loss(embs, n_slices, rngs):
     v, d = embs.shape[-2:]  # last two dims must be views, embedding dim
 
+    # project onto random dirs sampled from hypersphere
     A = jax.random.normal(rngs.next(), (d, n_slices))
     A = A / jnp.linalg.norm(A, axis=0, keepdims=True)
     projs = embs @ A
