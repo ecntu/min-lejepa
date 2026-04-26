@@ -4,7 +4,7 @@ Paper's official implementation (including a minimal one) available [here](https
 
 Running with defaults yields:
 
-<img width="3000" height="2100" alt="hero" src="https://github.com/user-attachments/assets/7c4469ab-1bd2-4558-ad5e-6a090e4e0846" />
+<img width="3000" height="2100" alt="hero" src="https://github.com/user-attachments/assets/98c03fac-bbef-4d62-b1a7-de3e1579eb33" />
 
 
 ### Citations
