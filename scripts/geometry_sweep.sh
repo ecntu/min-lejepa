@@ -4,9 +4,13 @@ set -euo pipefail
 mkdir -p logs_geometry
 
 lr=1e-3
-lamb=0.1
+lamb=0.01
 n_views=8
 steps=50_000
+
+# run with TPU=1 to install jax[tpu]
+extras=()
+[[ "${TPU:-0}" == "1" ]] && extras=(--with "jax[tpu]")
 
 # 117 runs total
 for seed in 0 1 2; do
@@ -43,7 +47,7 @@ for seed in 0 1 2; do
           continue
         fi
 
-        uv run --with jax[tpu] main.py "${args[@]}" 2>&1 | tee "${logfile}.log"
+        uv run "${extras[@]}" main.py "${args[@]}" 2>&1 | tee "${logfile}.log"
       done
     done
   done
