@@ -2,6 +2,10 @@ A minimal implementation of [LeJEPA](https://arxiv.org/abs/2511.08544) on [mnist
 
 Paper's official implementation (including a minimal one) available [here](https://github.com/galilai-group/lejepa). Note that the the paper's MINIMAL.md SIGReg loss pools slightly differently than their experiment code, which we follow here.
 
+Running with defaults yields:
+
+<img width="3000" height="2100" alt="hero" src="https://github.com/user-attachments/assets/7c4469ab-1bd2-4558-ad5e-6a090e4e0846" />
+
 
 ### Citations
 
