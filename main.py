@@ -67,41 +67,45 @@ def lejepa_loss(encoder, views, n_slices, lamb, rngs):
 lejepa_grad = nnx.value_and_grad(lejepa_loss, has_aux=True)
 
 
-def gen_views(x, n_views, rngs):
+def gen_views(x, n_views, rngs, aug_coef=1.0):
     bs, seq_len = x.shape
 
-    # Mirrors mnist1d's generative transforms
+    # Mirrors mnist1d's generative transforms (with aug_coef = 1.0)
     def one_view(key):
         k_shift, k_scale, k_corr, k_iid, k_mask_pos, k_mask_len, k_shear = (
             jax.random.split(key, 7)
         )
 
         # shift
-        shifts = jax.random.randint(k_shift, (bs,), 0, seq_len)
+        shifts = (jax.random.uniform(k_shift, (bs,)) * aug_coef * seq_len).astype(
+            jnp.int32
+        )
         v = jax.vmap(lambda xi, s: jnp.roll(xi, s))(x, shifts)
 
         # amplitude scale (per-example)
-        scale = 1.0 + 0.3 * jax.random.normal(k_scale, (bs, 1))
+        scale = 1.0 + aug_coef * 0.3 * jax.random.normal(k_scale, (bs, 1))
         v = v * scale
 
         # correlated (low-frequency) gaussian-smoothed noise
         raw = jax.random.normal(k_corr, (bs, seq_len))
         kernel = jnp.ones((7,)) / 7
         corr = jax.vmap(lambda r: jnp.convolve(r, kernel, mode="same"))(raw)
-        v = v + 0.25 * corr
+        v = v + aug_coef * 0.25 * corr
 
         # iid noise
-        v = v + 0.05 * jax.random.normal(k_iid, (bs, seq_len))
+        v = v + aug_coef * 0.05 * jax.random.normal(k_iid, (bs, seq_len))
 
         # masking: zero out a contiguous chunk (length-invariance)
-        mask_len = jax.random.randint(k_mask_len, (bs,), 0, 8)  # 0-7 zeros
+        mask_len = (jax.random.uniform(k_mask_len, (bs,)) * aug_coef * 8).astype(
+            jnp.int32
+        )
         mask_pos = jax.random.randint(k_mask_pos, (bs,), 0, seq_len)
         idx = jnp.arange(seq_len)[None, :]  # (1, seq_len)
         mask = (idx >= mask_pos[:, None]) & (idx < (mask_pos + mask_len)[:, None])
         v = jnp.where(mask, 0.0, v)
 
         # shear: subtract random linear ramp (mnist1d uses scale=0.75)
-        coeff = 0.75 * (jax.random.uniform(k_shear, (bs, 1)) - 0.5)
+        coeff = aug_coef * 0.75 * (jax.random.uniform(k_shear, (bs, 1)) - 0.5)
         v = v - coeff * jnp.linspace(-0.5, 0.5, seq_len)
 
         return v
@@ -134,6 +138,7 @@ class Config:
     n_slices: int = 128
     n_views: int = 4
     lamb: float = 0.01
+    aug: float = 0.25
     projector: bool = True
 
     emb_dim: int = 128
@@ -208,9 +213,9 @@ if __name__ == "__main__":
     clf_opt = nnx.Optimizer(clf, optax.adamw(cfg.lr), wrt=nnx.Param)
 
     @nnx.jit
-    def train_step(enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs):
+    def train_step(enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs, aug_coef):
 
-        views = gen_views(x, n_views=cfg.n_views, rngs=rngs)
+        views = gen_views(x, n_views=cfg.n_views, rngs=rngs, aug_coef=aug_coef)
         ((_, (embs, loss_embs, pred_loss, reg_loss)), enc_grads) = lejepa_grad(
             enc, views=views, n_slices=cfg.n_slices, lamb=cfg.lamb, rngs=rngs
         )
@@ -229,7 +234,7 @@ if __name__ == "__main__":
 
     for step, (x, y) in enumerate(train_loader()):
         pred_loss, reg_loss, probe_loss, clf_loss, embs, loss_embs = train_step(
-            enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs
+            enc, probe, clf, enc_opt, probe_opt, clf_opt, x, y, rngs, cfg.aug
         )
 
         if step % 100 == 0:
